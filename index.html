@@ -7,6 +7,7 @@
 <title>Alfa lek · Roba</title>
 <!--
   ALFA LEK · ROBA - zajednička aplikacija za telefon i računar (GitHub Pages)
+  Verzija 1.3 (17. 11. 2026) - pločica Serije i rokovi (skripta Serije i rokovi 2.0): barkod -> slikanje roka -> tabela Unos
   Verzija 1.2 (17. 11. 2026) - 🔄 Osveži šifarnik radi sa servera (skripta Pakovanje 2.2), rezultat se vidi u aplikaciji
   Verzija 1.1 (17. 11. 2026) - pločica Pakovanje (skripta Pakovanje 2.0)
   Verzija 1.0 (16. 11. 2026)
@@ -124,6 +125,9 @@
   .kKol { font-size: 22px; font-weight: bold; color: var(--ljub); margin: 6px 0; }
   .traka { height: 8px; background: #e0d7f1; border-radius: 4px; overflow: hidden; margin-top: 6px; }
   .traka div { height: 100%; background: var(--zel); }
+  /* Serije i rokovi */
+  .upozNar { background: #fff3e0; color: #e65100; }
+  #rok { font-size: 22px; font-weight: bold; letter-spacing: 1px; }
 </style>
 </head>
 <body>
@@ -139,7 +143,7 @@
 <input type="file" id="foto" accept="image/*" capture="environment" class="skriveno">
 
 <script>
-const VERZIJA_APP = '1.2';
+const VERZIJA_APP = '1.3';
 const K = (new URLSearchParams(location.search).get('k') || '').trim();
 
 /* ================= MODULI (pločice) =================
@@ -151,6 +155,9 @@ const MODULI = [
   { id: 'pakovanje', naziv: 'Pakovanje', opis: 'Pakovanje internih prenosa u magacinu', ikona: '🚚', boja: '#00acc1',
     api: 'https://script.google.com/macros/s/AKfycbzGorQoaUsL5UKUJpMxepqo1sFj8LLEMfJ3SHUGvEkrvkxtL0I5WZ2muoJLQGXeYQTK/exec',
     otvori: function (r) { pakStart(r); } },
+  { id: 'rokovi', naziv: 'Serije i rokovi', opis: 'Rok i serija slikanjem kutije', ikona: '📅', boja: '#d81b60',
+    api: 'https://script.google.com/macros/s/AKfycbzAfu8l60RpauzdzhOI5DLG7fOFFMyFTBkm8eo7WpN7pN_-G4Ri88b5XhWUr1rApEmrxQ/exec',
+    otvori: function (r) { rokStart(r); } },
   { id: 'popis', naziv: 'Popis', opis: 'Popis robe', ikona: '📋', boja: '#fb8c00', api: '', otvori: null }
 ];
 const APP = { dostupni: [], aktivni: null };
@@ -247,12 +254,14 @@ function otvoriModul(id) {
 function osvezi() {
   if (APP.aktivni === 'prijem') return prijemOsvezi();
   if (APP.aktivni === 'pakovanje') return pakOsvezi();
+  if (APP.aktivni === 'rokovi') return rokOsvezi();
   start();
 }
 
 function nazad() {
   if (APP.aktivni === 'prijem') return prijemNazad();
   if (APP.aktivni === 'pakovanje') return pakNazad();
+  if (APP.aktivni === 'rokovi') return rokNazad();
   pocetna();
 }
 
@@ -260,7 +269,10 @@ function nazad() {
 const SIF = { a: [], mapa: {}, komad: {}, ok: false };
 function ucitajSifarnik() {
   try { const st = lsGet('sifarnik'); if (st) primeniSifarnik(JSON.parse(st)); } catch (e) {}
-  const izvor = APP.dostupni[0].m;   // šifarnik daje prva dostupna skripta (svi koriste isti)
+  // šifarnik daje prva dostupna skripta (svi koriste isti); skripta Serije i rokovi ga ne daje
+  const d = APP.dostupni.filter(function (x) { return x.m.id !== 'rokovi'; })[0];
+  if (!d) return Promise.resolve();
+  const izvor = d.m;
   return poziv(izvor.api, 'apiSifarnik', [lsGet('sifarnikVerzija') || '']).then(function (r) {
     if (r && !r.isti) {
       lsSet('sifarnik', JSON.stringify({ a: r.a, b: r.b }));
@@ -341,7 +353,7 @@ window.addEventListener('beforeunload', function (e) {
 const SKEN = {
   rezim: lsGet('rezim') === 'brzo' ? 'brzo' : 'kartica',
   kamera: lsGet('kamera') !== 'ne',
-  ekrani: ['skener', 'rucno', 'prijem', 'pakuj', 'p_dodaj'],     // ekrani na kojima čitač radi
+  ekrani: ['skener', 'rucno', 'prijem', 'pakuj', 'p_dodaj', 'r_sken', 'r_artikal'],     // ekrani na kojima čitač radi
   primi: null                                // funkcija modula: primi(kod, namerno)
 };
 function postaviRezim(r) { SKEN.rezim = r; lsSet('rezim', r); const a = $('rzB'), b = $('rzK'); if (a) { a.classList.toggle('akt', r === 'brzo'); b.classList.toggle('akt', r !== 'brzo'); } }
@@ -411,6 +423,7 @@ function prebaciKameru() {
   if (S.ekran === 'skener') skener();
   else if (S.ekran === 'pakuj') pakujKartica(P.trenutna);
   else if (S.ekran === 'p_dodaj') pDodaj();
+  else if (S.ekran === 'r_sken') rokSken();
 }
 
 function pokreniKameru() {
@@ -1408,6 +1421,265 @@ function pakObrisi() {
       poruka('Interni prenos je obrisan.'); pakLista();
     }).catch(greska);
   });
+}
+
+/* =====================================================================
+   MODUL: SERIJE I ROKOVI  (skripta Serije i rokovi 2.0)
+   Barkod -> artikal iz šifarnika -> slikanje roka (Gemini) ili kucanje -> tabela Unos.
+   Serija = rok rečima (npr. 03/2027 -> MART 2027), može se prepraviti.
+   ===================================================================== */
+const R = { apoteka: '', admin: false, apoteke: [], poslednji: [], art: null, serijaRucno: false };
+const MESECI = ['JANUAR', 'FEBRUAR', 'MART', 'APRIL', 'MAJ', 'JUN', 'JUL',
+                'AVGUST', 'SEPTEMBAR', 'OKTOBAR', 'NOVEMBAR', 'DECEMBAR'];
+function apiR(fn) { return poziv(modul('rokovi').api, fn, Array.prototype.slice.call(arguments, 1)); }
+
+function rokStart(r) {
+  R.apoteka = r.apoteka || ''; R.admin = !!r.admin; R.apoteke = r.apoteke || []; R.poslednji = r.poslednji || [];
+  if (R.admin) {
+    const z = lsGet('rokApoteka');
+    if (z && R.apoteke.indexOf(z) >= 0) R.apoteka = z;
+    else if (!R.apoteka && R.apoteke.length) R.apoteka = R.apoteke[0];
+  }
+  rokSken();
+}
+
+function rokOsvezi() {
+  if (S.ekran !== 'r_sken') return;
+  cekaj('Osvežavam...');
+  apiR('apiPoslednji').then(function (l) { gotovo(); R.poslednji = l; rokSken(); }).catch(greska);
+  ucitajSifarnik().catch(function () {});
+}
+
+function rokNazad() {
+  zaustaviKameru();
+  if (S.ekran === 'r_artikal') return rokSken();
+  pocetna();
+}
+
+/* ---------- ekran skeniranja ---------- */
+function rokSken() {
+  zaustaviKameru();
+  S.ekran = 'r_sken'; R.art = null;
+  SKEN.primi = rokKod;
+  postaviNaslov('📅 Serije i rokovi', APP.dostupni.length > 1);
+  let h = '';
+  if (R.admin) {
+    h += '<label>Apoteka</label><select id="rokAp" onchange="R.apoteka=this.value;lsSet(\'rokApoteka\',this.value)">' +
+      R.apoteke.map(function (a) { return '<option' + (a === R.apoteka ? ' selected' : '') + '>' + esc(a) + '</option>'; }).join('') +
+      '</select><div class="razmak"></div>';
+  }
+  h += '<div class="deo">📷 Skenirajte barkod artikla</div>' +
+    skenerDeo(true) +
+    '<div class="red2"><input id="rucniKod" inputmode="numeric" autocomplete="off" placeholder="ili ukucajte barkod">' +
+    '<button id="dugOK" class="dugme plavo" style="flex:0 0 90px;margin:0" onclick="rokKod($(\'rucniKod\').value, true)">OK</button></div>' +
+    '<button class="dugme obrub" onclick="$(\'foto\').click()">📷 Slikaj barkod</button>' +
+    '<label>Artikal bez barkoda – potražite po nazivu</label>' +
+    '<input id="pretraga" placeholder="Upišite deo naziva (najmanje 3 slova)" autocomplete="off"><div id="rezPretrage"></div>' +
+    rokPoslednjiHtml() +
+    '<div class="verzija">Serije i rokovi · Alfa lek · Roba ' + VERZIJA_APP + '</div>';
+  $('ekran').innerHTML = h;
+  $('pretraga').addEventListener('input', rokPretrazi);
+  pokreniSkener();
+}
+
+function rokPoslednjiHtml() {
+  if (!R.poslednji.length) return '';
+  return '<div class="deo">Poslednji unosi</div><div class="poslednje">' + R.poslednji.map(function (x) {
+    return '<div class="r"><span>' + esc(x.naziv) + (R.admin && x.apoteka ? ' <span class="sitno">· ' + esc(x.apoteka) + '</span>' : '') +
+      '</span><b style="white-space:nowrap">' + esc(x.rok) + '</b></div>';
+  }).join('') + '</div>';
+}
+
+function rokPretrazi() {
+  const q = $('pretraga').value.trim().toLowerCase();
+  if (q.length < 3) { $('rezPretrage').innerHTML = ''; return; }
+  const delovi = q.split(/\s+/), rez = [];
+  for (let i = 0; i < SIF.a.length && rez.length < 40; i++) {
+    const n = SIF.a[i][1].toLowerCase();
+    if (delovi.every(function (d) { return n.indexOf(d) >= 0; })) rez.push(i);
+  }
+  $('rezPretrage').innerHTML = rez.length ? rez.map(function (i) {
+    const a = SIF.a[i];
+    return '<div class="kartica klik" onclick="rokIzaberi(' + i + ')"><div class="naslov">' + esc(a[1]) +
+      '</div><div class="sitno">ID ' + esc(a[0]) + '</div></div>';
+  }).join('') : '<div class="info">Nema artikla sa tim nazivom.</div>';
+}
+function rokIzaberi(i) {
+  const a = SIF.a[i];
+  rokArtikal({ id: a[0], naziv: a[1], komad: a[2] === 1, barkod: '' }, '');
+}
+
+/* rok iz GS1 2D koda, ako ga kutija ima: (17)GGMMDD -> MM/20GG */
+function gs1Rok(kod) {
+  let s = String(kod || '').replace(/^\](d2|C1|Q3)/, '');
+  let m = s.match(/\(17\)(\d{6})/);
+  if (m) return m[1].substr(2, 2) + '/20' + m[1].substr(0, 2);
+  if (!/^01\d{14}/.test(s)) return '';
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === '\u001d') { i++; continue; }
+    const ai = s.substr(i, 2);
+    if (ai === '01') i += 16;
+    else if (ai === '17') { const d = s.substr(i + 2, 6); return d.substr(2, 2) + '/20' + d.substr(0, 2); }
+    else if (ai === '11' || ai === '15') i += 8;
+    else if (ai === '10' || ai === '21') { let j = s.indexOf('\u001d', i + 2); if (j < 0) return ''; i = j; }
+    else return '';
+  }
+  return '';
+}
+
+/* kod iz bilo kog izvora (kamera, slika, kucanje, čitač) */
+function rokKod(kod, namerno) {
+  kod = String(kod || '').trim();
+  if (!kod || S.ekran !== 'r_sken') return;
+  if (!SIF.ok) return poruka('Šifarnik se još učitava, pokušajte za trenutak.', '#fb8c00');
+  if ($('rucniKod')) $('rucniKod').value = '';
+  const a = nadjiArtikal(kod);
+  if (!a) {
+    zvuk(false);
+    $('nadjeno').innerHTML = '<div class="upoz">❌ Barkod ' + esc(ocistiKod(kod)) + ' nije u šifarniku. Potražite artikal po nazivu.</div>';
+    return;
+  }
+  zvuk(true);
+  rokArtikal(a, gs1Rok(kod));
+}
+
+/* ---------- ekran artikla: rok i serija ---------- */
+function rokArtikal(a, rokIzKoda) {
+  zaustaviKameru();
+  S.ekran = 'r_artikal'; R.art = a; R.serijaRucno = false;
+  postaviNaslov('📅 Rok i serija', true);
+  $('ekran').innerHTML =
+    '<div class="dokument"><div class="oznaka">Artikal</div><div class="naslov">' + esc(a.naziv) + '</div>' +
+    '<div class="sitno">ID ' + esc(a.id) + (a.barkod ? ' · ' + esc(a.barkod) : '') + (R.admin ? ' · ' + esc(R.apoteka) : '') + '</div></div>' +
+    '<button class="dugme njezno" onclick="$(\'rokFoto\').click()">📷 Slikaj rok</button>' +
+    '<input type="file" id="rokFoto" accept="image/*" capture="environment" class="skriveno">' +
+    '<div id="rokInfo"></div>' +
+    '<label>Rok (MM/GGGG)</label><input id="rok" inputmode="numeric" autocomplete="off" placeholder="npr. 0328">' +
+    '<div id="rokUpoz"></div>' +
+    '<label>Serija (sama se popunjava iz roka)</label>' +
+    '<input id="serija" autocomplete="off" autocapitalize="characters" placeholder="npr. MART 2027">' +
+    '<div class="red2"><button class="dugme obrub" onclick="rokSken()">Otkaži</button>' +
+    '<button class="dugme zeleno" id="dugSacuvaj" onclick="rokSacuvaj()">✔ Sačuvaj' + (jeRacunar() ? ' (Enter)' : '') + '</button></div>';
+
+  $('rok').addEventListener('input', function () {
+    const d = this.value.replace(/\D/g, '').slice(0, 6);
+    this.value = d.length > 2 ? d.slice(0, 2) + '/' + d.slice(2) : d;
+    rokProveri();
+  });
+  $('serija').addEventListener('input', function () { R.serijaRucno = this.value.trim() !== ''; });
+  $('rokFoto').addEventListener('change', rokSlika);
+
+  if (rokIzKoda) {
+    $('rok').value = rokIzKoda; rokProveri();
+    $('rokInfo').innerHTML = '<div class="info">Rok pročitan iz 2D koda – proverite.</div>';
+  }
+  if (jeRacunar()) setTimeout(function () { if ($('rok')) $('rok').focus(); }, 60);
+  window.scrollTo(0, 0);
+}
+
+/* 0328 -> 03/2028; 032028 -> 03/2028 */
+function rokNorm(v, konacno) {
+  const d = String(v).replace(/\D/g, '');
+  let mm, g;
+  if (d.length === 4) {
+    if (d.slice(2) === '20' && !konacno) return null;   // verovatno se kuca 2028...
+    mm = d.slice(0, 2); g = '20' + d.slice(2);
+  } else if (d.length === 6) {
+    mm = d.slice(0, 2); g = d.slice(2);
+  } else return null;
+  return { tekst: mm + '/' + g, mm: +mm, g: +g };
+}
+function rokSerija(n) { return MESECI[n.mm - 1] + ' ' + n.g; }
+
+function rokProveri(konacno) {
+  const u = $('rokUpoz');
+  const n = rokNorm($('rok').value, konacno);
+  if (!n) { u.innerHTML = ''; return null; }
+  if (n.mm < 1 || n.mm > 12) { u.innerHTML = '<div class="upoz">Mesec mora biti od 01 do 12.</div>'; return null; }
+  const sad = new Date();
+  const razlika = (n.g * 12 + n.mm) - (sad.getFullYear() * 12 + sad.getMonth() + 1);
+  n.istekao = razlika < 0;
+  if (razlika < 0) u.innerHTML = '<div class="upoz">⛔ Rok je istekao!</div>';
+  else if (razlika === 0) u.innerHTML = '<div class="upoz upozNar">⚠️ Rok ističe ovog meseca.</div>';
+  else if (razlika < 6) u.innerHTML = '<div class="upoz upozNar">⚠️ Kratak rok – ističe za ' + razlika + ' mes.</div>';
+  else u.innerHTML = '';
+  if (!R.serijaRucno) $('serija').value = rokSerija(n);
+  return n;
+}
+
+/* ---------- slikanje roka ---------- */
+function rokSlika() {
+  const f = this.files && this.files[0]; this.value = '';
+  if (!f) return;
+  cekaj('Čitam rok sa slike...');
+  const t0 = Date.now();
+  smanjiSliku(f).then(function (b64) {
+    return saRokom(apiR('apiProcitaj', b64, 'image/jpeg'), 25000);
+  }).then(function (o) {
+    gotovo();
+    if (S.ekran !== 'r_artikal') return;
+    const uk = ((Date.now() - t0) / 1000).toFixed(1).replace('.', ',');
+    if (o.rok) {
+      $('rok').value = o.rok; rokProveri();
+      $('rokInfo').innerHTML = '<div class="info">Na kutiji: <b>' + esc(o.procitano || o.rok) + '</b> – proverite pre čuvanja.' +
+        '<div class="sitno">⏱ ' + uk + ' s</div></div>';
+      zvuk(true);
+    } else {
+      $('rokInfo').innerHTML = '<div class="upoz upozNar">Rok nije pročitan. Slikajte bliže ili ga ukucajte.</div>';
+      zvuk(false);
+    }
+  }).catch(function (e) {
+    gotovo();
+    if ($('rokInfo')) $('rokInfo').innerHTML = '<div class="upoz upozNar">' + esc(e.message) + '</div>';
+    zvuk(false);
+  });
+}
+
+function saRokom(p, ms) {
+  return Promise.race([p, new Promise(function (res, rej) {
+    setTimeout(function () { rej(new Error('Čitanje traje predugo. Ukucajte rok ili slikajte ponovo.')); }, ms);
+  })]);
+}
+
+/* slika se smanjuje pre slanja (brže) */
+function smanjiSliku(f) {
+  return new Promise(function (res, rej) {
+    const img = new Image();
+    const u = URL.createObjectURL(f);
+    img.onload = function () {
+      const max = 1024;
+      let w = img.naturalWidth, h = img.naturalHeight;
+      const k = Math.min(1, max / Math.max(w, h));
+      w = Math.round(w * k); h = Math.round(h * k);
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      c.getContext('2d').drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(u);
+      res(c.toDataURL('image/jpeg', 0.8).split(',')[1]);
+    };
+    img.onerror = function () { URL.revokeObjectURL(u); rej(new Error('Slika nije učitana.')); };
+    img.src = u;
+  });
+}
+
+/* ---------- čuvanje ---------- */
+function rokSacuvaj() {
+  const a = R.art;
+  if (!a) return;
+  const n = rokProveri(true);
+  if (!n) { poruka('Upišite ispravan rok (npr. 0328).', '#c62828'); $('rok').focus(); return; }
+  if (n.istekao && !confirmLako('Rok je istekao. Ipak sačuvati?')) return;
+  const ser = $('serija').value.trim() || rokSerija(n);
+  const d = { barkod: a.barkod || '', id: a.id, naziv: a.naziv, serija: ser, rok: n.tekst, apoteka: R.apoteka };
+  cekaj('Čuvam...');
+  apiR('apiUpisi', d).then(function () {
+    gotovo(); zvuk(true);
+    poruka('✓ ' + a.naziv + ' · ' + n.tekst);
+    R.poslednji.unshift({ naziv: a.naziv, rok: n.tekst, serija: ser, apoteka: R.apoteka });
+    R.poslednji = R.poslednji.slice(0, 15);
+    rokSken();
+  }).catch(greska);
 }
 
 start();
