@@ -7,6 +7,7 @@
 <title>Alfa lek · Roba</title>
 <!--
   ALFA LEK · ROBA - zajednička aplikacija za telefon i računar (GitHub Pages)
+  Verzija 1.2 (17. 11. 2026) - 🔄 Osveži šifarnik radi sa servera (skripta Pakovanje 2.2), rezultat se vidi u aplikaciji
   Verzija 1.1 (17. 11. 2026) - pločica Pakovanje (skripta Pakovanje 2.0)
   Verzija 1.0 (16. 11. 2026)
     - početni ekran sa pločicama: Prijem robe (sada), Pakovanje i Popis (kasnije)
@@ -138,7 +139,7 @@
 <input type="file" id="foto" accept="image/*" capture="environment" class="skriveno">
 
 <script>
-const VERZIJA_APP = '1.1';
+const VERZIJA_APP = '1.2';
 const K = (new URLSearchParams(location.search).get('k') || '').trim();
 
 /* ================= MODULI (pločice) =================
@@ -1048,9 +1049,12 @@ function pakUvoz() {
 }
 
 function pakSifarnik() {
-  try { window.open(P.linkSifarnik, '_blank'); } catch (e) {}
-  lsSet('sifarnikVerzija', '');
-  poruka('Šifarnik se osvežava u novoj kartici. Kad završi, vratite se ovde i kliknite ↻.', '#5b7a99');
+  cekaj('Osvežavam šifarnik... (do jednog minuta)');
+  apiK('apiOsveziSifarnik').then(function (r) {
+    P.porukaUvoza = ['🔄 Šifarnik:'].concat(r.linije || []);
+    cekaj('Preuzimam novi šifarnik na telefon...');
+    return ucitajSifarnik().then(function () { gotovo(); poruka('Šifarnik je osvežen.'); }, function (e) { gotovo(); poruka('Šifarnik nije preuzet: ' + e.message, '#c62828'); });
+  }).then(function () { if (S.ekran === 'p_lista') pakLista(); }).catch(greska);
 }
 
 /* ---------- jedan interni prenos ---------- */
